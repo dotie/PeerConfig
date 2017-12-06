@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# PeerConfig
+# Python3 script to parse PeeringDB for common IXPs and generate IOS-XR config
+# https://github.com/dotie/PeerConfig
+
+# Forked from PeerFinder
+# https://github.com/rucarrol/PeerFinder
+
+from configparser import ConfigParser
+import json
+import argparse
+import requests
+
+# Import config
+config_file = 'peerconfig.conf'
+
+parser = ConfigParser()
+parser.read(config_file)
+if len(parser.read(config_file)) == 0:
+    print("Error opening config file")
+    exit()
+
+# Import defaults
+try:
+    sourceasn = parser.get('defaults', 'asn')
+    defaultv4ng = parser.get('defaults', 'v4ng')
+    defaultv6ng = parser.get('defaults', 'v6ng')
+except:
+    print("Error parsing default values from config file")
+    exit()
+
+# Functions
+
+def main():
+
+    args = getArgs()
+    targetasn = args.asn[0]
+    asns = [sourceasn,targetasn]
+    pdata = dict()
+    # print(asns)
+    for asn in asns:
+        pdata[asn] = getPeeringDB(asn)
+
+    # Lets check to see if we have valid data in our replies.
+    try:
+        for asn in pdata.keys():
+            asn = pdata[str(asn)]['data'][0]['asn']
+            peer_name = pdata[str(asn)]['data'][0]['name']
+    except IndexError:
+        print("Looks like an empty dataset, exiting")
+        print("result: %s" % pdata[asn])
+        exit(1)
+
+
+    # Dump all our ix names into a list
+    ixp = dict()
+    for asn in pdata.keys():
+        ixp[asn] = getFac(pdata[str(asn)], "netixlan_set")
+
+    # For all our IXs, see if they have the same IX
+    # Have to seed the common ix list with the first entry, otherwise the intersection of [] will always be []
+
+    common_ix_list = ixp[list(ixp)[0]]
+    for asn in ixp:
+        common_ix_list = list(set(ixp[asn]).intersection(common_ix_list))
+
+    if len(common_ix_list) < 1:
+        print("Didnt find any common IX, exiting...")
+        exit(1)
+
+    for ix in common_ix_list:
+        for i in pdata[targetasn]['data'][0]['netixlan_set']:
+            if i['name'] not in common_ix_list:
+                continue
+            if ix == i['name']:
+                try:
+                    v4ng = parser.get(str(i['ix_id']), 'v4ng')
+                except:
+                    v4ng = defaultv4ng
+                try:
+                    v6ng = parser.get(str(i['ix_id']), 'v6ng')
+                except:
+                    v6ng = defaultv6ng
+                try:
+                    description = parser.get(str(i['ix_id']), 'description')
+                except:
+                    description = ""
+                # Print Config:
+                print('')
+                if i['ipaddr4'] != None:
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr4']) + ' remote-as ' + targetasn)
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr4']) + ' use neighbor-group ' + v4ng)
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr4']) + ' description ' + description + ': ' + pdata[targetasn]['data'][0]['name'])
+                if i['ipaddr6'] != None:
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr6']) + ' remote-as ' + targetasn)
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr6']) + ' use neighbor-group ' + v6ng)
+                    print('router bgp ' + sourceasn + ' neighbor ' + str(i['ipaddr6']) + ' description ' + description + ': ' + pdata[targetasn]['data'][0]['name'])
+
+    exit(0)
+
+def getArgs():
+    help_text = "Generate IOS-XR config for common IXPs. -h for help"
+    parser = argparse.ArgumentParser(help_text)
+    parser.add_argument('asn', nargs=1, help = 'Target ASN')
+    args = parser.parse_args()
+    return args
+
+
+def getPeeringDB(ASN):
+    """Function to connect to peeringDB and fetch results for a given ASN
+
+    Args:
+        ASN: A numeric, 32 bit number AS number.
+
+    Returns:
+        A dict which contains the dataset for a given ASN. Specific API docs here: https://api.peeringdb.com/apidocs/#!/net/Network_list
+
+    """
+    HTTP_OK = 200
+    pdb_url = 'https://api.peeringdb.com/api/net?asn__in=%s&depth=2' % ASN
+    print("Fetching PeeringDB info for %s" % ASN)
+    r = requests.get(pdb_url)
+    if r.status_code != HTTP_OK:
+        print("Got unexpected status code, exiting")
+        print("%s - %s" % (r.status, r.text))
+        exit(1)
+    pdb_res = r.json()
+    return pdb_res
+
+def getFac(pdb, nettype):
+    fac_set = []
+    for item in pdb['data'][0][nettype]:
+        fac_set.append(item['name'])
+    return fac_set
+
+if __name__ == "__main__":
+    main()
